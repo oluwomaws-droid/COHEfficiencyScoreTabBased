@@ -312,6 +312,10 @@ For more information about the Cost Efficiency Score, see [Understanding your co
 
 ---
 
-**About the author**
+**About the authors**
 
-*[Author Name]* is a Cloud Support Engineer at AWS, helping customers optimize their cloud investments through AWS Cost Management services.
+*Wole Modupe* is .....
+*Jacob Scheatzle* is .....
+*Joe Rader* is .....
+
+
