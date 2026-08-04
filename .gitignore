@@ -4,3 +4,4 @@ __pycache__/
 *.pyc
 .env
 build.log
+blog-post.md
