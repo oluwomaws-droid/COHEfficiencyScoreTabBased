@@ -1,0 +1,14 @@
+{
+  "mcpServers": {
+    "bcm-mcp": {
+      "command": "uvx",
+      "args": [
+        "--with", "botocore[crt]",
+        "awslabs.billing-cost-management-mcp-server@latest"
+      ],
+      "env": {
+        "AWS_REGION": "us-east-1"
+      }
+    }
+  }
+}
