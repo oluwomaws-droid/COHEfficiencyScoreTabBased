@@ -12,7 +12,7 @@ This post shows you how to programmatically calculate the Cost Efficiency Score 
 
 The solution combines two AWS APIs that support tag-based filtering to reconstruct the Cost Efficiency Score formula at the tag level:
 
-1. **Cost Optimization Hub `ListRecommendations`** — supports a `tags` filter, providing the Potential Savings and estimated monthly cost for resources matching a specific tag.
+1. **Cost Optimization Hub `ListRecommendationSummaries`** — supports a `tags` filter, providing the deduped Potential Savings for resources matching a specific tag. `ListRecommendations` supplements with `estimatedMonthlyCost` for the denominator.
 2. **AWS Cost Explorer `GetCostAndUsage`** — supports filtering by tag and service, providing the Total Optimizable Spend scoped to services where Cost Optimization Hub provides recommendations.
 
 The following diagram shows how the solution retrieves data from both APIs and combines them to produce a per-tag efficiency score:
@@ -30,14 +30,13 @@ The following diagram shows how the solution retrieves data from both APIs and c
 │ Optimization │  │   Explorer       │
 │    Hub       │  │                  │
 │              │  │ GetCostAndUsage  │
-│ ListRecs     │  │ (tag + service   │
+│ ListRecSumm  │  │ (tag + service   │
 │ (tag filter) │  │  filter)         │
 └──────┬───────┘  └────────┬─────────┘
        │                   │
        ▼                   ▼
   Potential            Total Optimizable
-  Savings +            Spend (30-day
-  COH Monthly Cost     rolling window)
+  Savings (deduped)    Spend (30-day)
        │                   │
        └─────────┬─────────┘
                  ▼
@@ -68,7 +67,7 @@ For this walkthrough, you should have the following prerequisites:
 - An AWS account with Cost Optimization Hub enabled
 - Cost allocation tags activated in the AWS Billing console
 - Python 3.9 or later with `boto3` installed (`pip install boto3`)
-- IAM permissions for `cost-optimization-hub:ListRecommendations` and `ce:GetCostAndUsage`
+- IAM permissions for `cost-optimization-hub:ListRecommendations`, `cost-optimization-hub:ListRecommendationSummaries`, and `ce:GetCostAndUsage`
 
 ### Define services in scope
 
@@ -92,20 +91,39 @@ OPTIMIZABLE_SERVICES = [
 
 ### Retrieve Potential Savings from Cost Optimization Hub
 
-Use the `ListRecommendations` API with a tag filter to get the estimated monthly savings for all resources matching your tag. The API also returns `estimatedMonthlyCost` for each recommendation, which you use later in the denominator calculation.
+Use the `ListRecommendationSummaries` API with a tag filter to get the **deduped** estimated monthly savings. This API internally deduplicates savings across resource types, matching how efficiency metrics are calculated in the console.
 
 ```python
 import boto3
 from botocore.config import Config
 
-def get_savings_for_tag(session, tag_key, tag_value):
-    """Get potential savings and COH-estimated cost for a tag value."""
+def get_deduped_savings_for_tag(session, tag_key, tag_value):
+    """Get deduped potential savings using ListRecommendationSummaries."""
     client = session.client(
         "cost-optimization-hub",
         config=Config(retries={"max_attempts": 5, "mode": "adaptive"}),
     )
 
-    total_savings = 0.0
+    response = client.list_recommendation_summaries(
+        filter={"tags": [{"key": tag_key, "value": tag_value}]},
+        groupBy="ResourceType",
+        maxResults=1000,
+    )
+
+    # estimatedTotalDedupedSavings is the authoritative deduped total
+    return response.get("estimatedTotalDedupedSavings", 0.0)
+```
+
+You also need the `estimatedMonthlyCost` from `ListRecommendations` for the denominator calculation (explained in Step 4):
+
+```python
+def get_coh_cost_for_tag(session, tag_key, tag_value):
+    """Get sum of estimatedMonthlyCost for the denominator."""
+    client = session.client(
+        "cost-optimization-hub",
+        config=Config(retries={"max_attempts": 5, "mode": "adaptive"}),
+    )
+
     total_coh_cost = 0.0
     next_token = None
 
@@ -120,14 +138,13 @@ def get_savings_for_tag(session, tag_key, tag_value):
         response = client.list_recommendations(**params)
 
         for rec in response.get("items", []):
-            total_savings += rec.get("estimatedMonthlySavings", 0.0)
             total_coh_cost += rec.get("estimatedMonthlyCost", 0.0)
 
         next_token = response.get("nextToken")
         if not next_token:
             break
 
-    return total_savings, total_coh_cost
+    return total_coh_cost
 ```
 
 ### Retrieve Total Optimizable Spend from Cost Explorer
@@ -207,8 +224,11 @@ def main():
     tag_key = "Application"
     tag_value = "PaymentService"
 
-    # Get savings and COH cost from Cost Optimization Hub
-    potential_savings, coh_cost = get_savings_for_tag(session, tag_key, tag_value)
+    # Get deduped savings from ListRecommendationSummaries
+    potential_savings = get_deduped_savings_for_tag(session, tag_key, tag_value)
+
+    # Get COH cost for denominator
+    coh_cost = get_coh_cost_for_tag(session, tag_key, tag_value)
 
     # Get actual spend from Cost Explorer
     ce_spend = get_optimizable_spend(session, tag_key, tag_value)
@@ -234,18 +254,17 @@ Application: PaymentService
   Cost Efficiency Score:   92.9%
 ```
 
-To scale this across all values of a tag key, retrieve all recommendations without a tag-value filter and group them by inspecting the `tags` field on each recommendation item:
+To scale this across all values of a tag key, first discover all tag values by scanning recommendations, then call `get_deduped_savings_for_tag` for each:
 
 ```python
-def get_all_savings_by_tag(session, tag_key):
-    """Pull all recommendations and group by tag key."""
+def discover_tag_values(session, tag_key):
+    """Discover all values for a tag key by scanning recommendations."""
     client = session.client(
         "cost-optimization-hub",
         config=Config(retries={"max_attempts": 5, "mode": "adaptive"}),
     )
 
-    savings_by_tag = {}
-    coh_cost_by_tag = {}
+    tag_values = set()
     next_token = None
 
     while True:
@@ -258,25 +277,17 @@ def get_all_savings_by_tag(session, tag_key):
         for rec in response.get("items", []):
             for tag in rec.get("tags", []):
                 if tag.get("key") == tag_key:
-                    tv = tag["value"]
-                    savings_by_tag[tv] = (
-                        savings_by_tag.get(tv, 0.0)
-                        + rec.get("estimatedMonthlySavings", 0.0)
-                    )
-                    coh_cost_by_tag[tv] = (
-                        coh_cost_by_tag.get(tv, 0.0)
-                        + rec.get("estimatedMonthlyCost", 0.0)
-                    )
+                    tag_values.add(tag["value"])
                     break
 
         next_token = response.get("nextToken")
         if not next_token:
             break
 
-    return savings_by_tag, coh_cost_by_tag
+    return sorted(tag_values)
 ```
 
-This produces a report like:
+You can then loop through each discovered tag value, call `get_deduped_savings_for_tag` and `get_optimizable_spend` for each, and calculate individual scores to produce a report like:
 
 ```
 Cost Efficiency Score by Tag: Application
