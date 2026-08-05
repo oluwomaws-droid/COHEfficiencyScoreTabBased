@@ -12,7 +12,7 @@ Cost Efficiency = [1 - (Potential Savings / Total Optimizable Spend)] x 100%
 
 This tool computes it per tag value by combining two AWS APIs:
 
-1. **Potential Savings** — Pulls recommendations from Cost Optimization Hub filtered by tag, and sums the `estimatedMonthlySavings`.
+1. **Potential Savings** — Uses `ListRecommendationSummaries` with a tag filter to get `estimatedTotalDedupedSavings`. This API internally deduplicates savings across resource types, matching how efficiency metrics are calculated in the console.
 2. **Total Optimizable Spend** — Uses the higher of:
    - Cost Explorer's 30-day amortized spend for supported services (captures all resources, including those with no recommendations)
    - Sum of COH's `estimatedMonthlyCost` for recommended resources (730-hour normalized monthly cost)
@@ -49,7 +49,7 @@ COH Efficiency Score/
 - Python 3.9+
 - Node.js 18+
 - AWS credentials configured with read access to:
-  - Cost Optimization Hub (`cost-optimization-hub:ListRecommendations`)
+  - Cost Optimization Hub (`cost-optimization-hub:ListRecommendations`, `cost-optimization-hub:ListRecommendationSummaries`)
   - Cost Explorer (`ce:GetCostAndUsage`)
 - Cost Optimization Hub must be enabled in the account/organization
 - Cost allocation tags must be activated in the Billing console
