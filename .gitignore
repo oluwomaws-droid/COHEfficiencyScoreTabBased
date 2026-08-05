@@ -5,3 +5,6 @@ __pycache__/
 .env
 build.log
 blog-post.md
+blog-post.docx
+skill-development.md
+skill/
