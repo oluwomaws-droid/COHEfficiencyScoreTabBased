@@ -1,6 +1,6 @@
 # Calculate Cost Efficiency Scores by Tag Using AWS Cost Optimization Hub
 
-[Author Name], Cloud Support Engineer, AWS
+[Author Name], Technical Account Manager, AWS
 
 Organizations running workloads at scale on AWS often manage hundreds of applications, each identified by resource tags such as `Application`, `Team`, or `Environment`. While AWS Cost Optimization Hub provides a Cost Efficiency Score at the account and region level, many customers want to measure and track this metric at the tag level to understand cost efficiency on a per-application basis.
 
@@ -309,6 +309,6 @@ For more information about the Cost Efficiency Score, see [Understanding your co
 
 ### Author bio
 
-[Author Name] is a Cloud Support Engineer at AWS, helping customers optimize their cloud investments through AWS Cost Management services.
+[Author Name] is a Technical Account Manager at AWS, helping customers optimize their cloud investments through AWS Cost Management services.
 
 Suggested tags: cost-optimization, cost-optimization-hub, cost-explorer, finops, tagging
