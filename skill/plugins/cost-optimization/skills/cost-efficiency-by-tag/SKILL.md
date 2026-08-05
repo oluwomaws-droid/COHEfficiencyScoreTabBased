@@ -36,21 +36,17 @@ Ask the customer which tag key they want to group by (e.g., `Application`, `Team
 
 ### Step 2: Get Potential Savings from Cost Optimization Hub
 
-Call `cost_optimization` → `list_recommendations` to retrieve recommendations.
+Call `cost_optimization` → `list_recommendation_summaries` to retrieve **deduped savings** for the tagged resources. This API internally deduplicates savings across resource types, matching how efficiency metrics are calculated in the console.
 
-**If a specific tag value is provided:**
+**For each tag value:**
 ```
 filter: { "tags": [{ "key": "<tag_key>", "value": "<tag_value>" }] }
+groupBy: "ResourceType"
 ```
 
-**If computing for all values of a tag key:**
-Call `list_recommendations` without a tag-value filter (paginate with `maxResults: 1000`). For each recommendation, inspect the `tags` array to find the value of the requested tag key and group accordingly.
+The response includes `estimatedTotalDedupedSavings` — use this as the Potential Savings (numerator). This is the authoritative deduped total that avoids double-counting when a resource has multiple recommendation types.
 
-For each recommendation, collect:
-- `estimatedMonthlySavings` — contributes to Potential Savings (numerator)
-- `estimatedMonthlyCost` — contributes to COH cost baseline (used in denominator)
-
-Sum both values per tag value.
+Then call `cost_optimization` → `list_recommendations` with the same tag filter to collect `estimatedMonthlyCost` per recommendation (needed for the denominator calculation) and optionally resource details for drill-down.
 
 ### Step 3: Get Total Optimizable Spend from Cost Explorer
 

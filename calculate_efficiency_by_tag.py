@@ -45,8 +45,12 @@ def get_potential_savings_by_tag(
     """
     Query Cost Optimization Hub for potential savings grouped by tag value.
 
+    Uses ListRecommendationSummaries for deduped savings (the same approach
+    used internally by the efficiency metrics calculation). Falls back to
+    ListRecommendations for estimatedMonthlyCost and resource details.
+
     Returns a tuple of:
-      - dict mapping tag_value -> estimated_monthly_savings
+      - dict mapping tag_value -> estimated_monthly_savings (deduped)
       - dict mapping tag_value -> estimated_monthly_cost (sum from COH recommendations)
       - dict mapping tag_value -> list of resource details (if include_resources=True)
     """
@@ -63,31 +67,66 @@ def get_potential_savings_by_tag(
     if tag_value:
         tag_values_to_query = [tag_value]
     else:
-        tag_values_to_query = None
+        # Discover all tag values by pulling recommendations and inspecting tags
+        tag_values_to_query = _discover_tag_values(client, tag_key)
 
-    if tag_values_to_query:
-        for tv in tag_values_to_query:
-            savings, coh_cost, resources = _get_savings_for_tag_value(
-                client, tag_key, tv, include_resources
-            )
-            savings_by_tag[tv] = savings
-            coh_cost_by_tag[tv] = coh_cost
-            if include_resources:
-                resources_by_tag[tv] = resources
-    else:
-        # Pull all recommendations and group by tag
-        savings_by_tag, coh_cost_by_tag, resources_by_tag = _get_all_savings_grouped_by_tag(
-            client, tag_key, include_resources
+    for tv in tag_values_to_query:
+        # Get deduped savings from ListRecommendationSummaries
+        deduped_savings = _get_deduped_savings_for_tag(client, tag_key, tv)
+        savings_by_tag[tv] = deduped_savings
+
+        # Get estimatedMonthlyCost (and resources if requested) from ListRecommendations
+        coh_cost, resources = _get_cost_and_resources_for_tag(
+            client, tag_key, tv, include_resources
         )
+        coh_cost_by_tag[tv] = coh_cost
+        if include_resources:
+            resources_by_tag[tv] = resources
 
     return savings_by_tag, coh_cost_by_tag, resources_by_tag
 
 
-def _get_savings_for_tag_value(
+def _get_deduped_savings_for_tag(client, tag_key: str, tag_value: str) -> float:
+    """
+    Get deduped potential savings for a tag value using ListRecommendationSummaries.
+
+    This API internally deduplicates savings across resource types, matching
+    how the efficiency metrics are calculated in the console.
+    """
+    total_deduped_savings = 0.0
+    next_token = None
+
+    while True:
+        params = {
+            "filter": {
+                "tags": [{"key": tag_key, "value": tag_value}]
+            },
+            "groupBy": "ResourceType",
+            "maxResults": 1000,
+        }
+        if next_token:
+            params["nextToken"] = next_token
+
+        response = client.list_recommendation_summaries(**params)
+
+        # estimatedTotalDedupedSavings is the authoritative deduped total
+        total_deduped_savings = response.get("estimatedTotalDedupedSavings", 0.0)
+
+        next_token = response.get("nextToken")
+        if not next_token:
+            break
+
+    return total_deduped_savings
+
+
+def _get_cost_and_resources_for_tag(
     client, tag_key: str, tag_value: str, include_resources: bool = False
-) -> tuple[float, float, list[dict]]:
-    """Get total potential savings and COH cost for a specific tag key/value pair."""
-    total_savings = 0.0
+) -> tuple[float, list[dict]]:
+    """
+    Get estimatedMonthlyCost and resource details from ListRecommendations.
+
+    Used for the denominator calculation (COH cost) and optional resource detail view.
+    """
     total_coh_cost = 0.0
     resources: list[dict] = []
     paginator_params = {
@@ -105,10 +144,7 @@ def _get_savings_for_tag_value(
         response = client.list_recommendations(**paginator_params)
 
         for rec in response.get("items", []):
-            savings = rec.get("estimatedMonthlySavings", 0.0)
-            coh_cost = rec.get("estimatedMonthlyCost", 0.0)
-            total_savings += savings
-            total_coh_cost += coh_cost
+            total_coh_cost += rec.get("estimatedMonthlyCost", 0.0)
             if include_resources:
                 resources.append(_extract_resource_info(rec))
 
@@ -116,21 +152,17 @@ def _get_savings_for_tag_value(
         if not next_token:
             break
 
-    return total_savings, total_coh_cost, resources
+    return total_coh_cost, resources
 
 
-def _get_all_savings_grouped_by_tag(
-    client, tag_key: str, include_resources: bool = False
-) -> tuple[dict[str, float], dict[str, float], dict[str, list[dict]]]:
+def _discover_tag_values(client, tag_key: str) -> list[str]:
     """
-    Pull all recommendations and group savings by the specified tag key.
+    Discover all values for a given tag key by scanning recommendations.
 
-    Since COH doesn't support groupBy tag natively, we pull all recommendations
-    and inspect each one's tags to build the grouping.
+    Since COH doesn't support groupBy tag, we pull all recommendations
+    and collect unique tag values.
     """
-    savings_by_tag: dict[str, float] = {}
-    coh_cost_by_tag: dict[str, float] = {}
-    resources_by_tag: dict[str, list[dict]] = {}
+    tag_values: set[str] = set()
     next_token = None
 
     while True:
@@ -141,29 +173,17 @@ def _get_all_savings_grouped_by_tag(
         response = client.list_recommendations(**params)
 
         for rec in response.get("items", []):
-            # Each recommendation has tags associated with the resource
             rec_tags = rec.get("tags", [])
-            tag_value = None
             for tag in rec_tags:
                 if tag.get("key") == tag_key:
-                    tag_value = tag.get("value", "")
+                    tag_values.add(tag.get("value", ""))
                     break
-
-            if tag_value is not None:
-                savings = rec.get("estimatedMonthlySavings", 0.0)
-                coh_cost = rec.get("estimatedMonthlyCost", 0.0)
-                savings_by_tag[tag_value] = savings_by_tag.get(tag_value, 0.0) + savings
-                coh_cost_by_tag[tag_value] = coh_cost_by_tag.get(tag_value, 0.0) + coh_cost
-                if include_resources:
-                    if tag_value not in resources_by_tag:
-                        resources_by_tag[tag_value] = []
-                    resources_by_tag[tag_value].append(_extract_resource_info(rec))
 
         next_token = response.get("nextToken")
         if not next_token:
             break
 
-    return savings_by_tag, coh_cost_by_tag, resources_by_tag
+    return sorted(tag_values)
 
 
 def _extract_resource_info(rec: dict) -> dict:
