@@ -12,9 +12,9 @@ Cost Efficiency = [1 - (Potential Savings / Total Optimizable Spend)] x 100%
 
 This tool computes it per tag value by combining two AWS APIs:
 
-1. **Potential Savings** — Uses `ListRecommendationSummaries` with a tag filter to get `estimatedTotalDedupedSavings`. This API internally deduplicates savings across resource types, matching how efficiency metrics are calculated in the console.
+1. **Potential Savings** — Uses `ListRecommendationSummaries` with `groupBy=TagKey:<key>` to get deduped savings per tag value in a single call.
 2. **Total Optimizable Spend** — Uses the higher of:
-   - Cost Explorer's 30-day amortized spend for supported services (captures all resources, including those with no recommendations)
+   - Cost Explorer's 30-day net amortized spend (credits and refunds removed) for supported services (captures all resources, including those with no recommendations)
    - Sum of COH's `estimatedMonthlyCost` for recommended resources (730-hour normalized monthly cost)
 
    Using the higher value ensures the denominator stays consistent with the savings numerator, avoiding edge cases where calendar-day spend is slightly lower than COH's normalized monthly cost (e.g., partial days, variable month lengths).

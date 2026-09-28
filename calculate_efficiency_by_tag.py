@@ -45,9 +45,8 @@ def get_potential_savings_by_tag(
     """
     Query Cost Optimization Hub for potential savings grouped by tag value.
 
-    Uses ListRecommendationSummaries for deduped savings (the same approach
-    used internally by the efficiency metrics calculation). Falls back to
-    ListRecommendations for estimatedMonthlyCost and resource details.
+    Uses ListRecommendationSummaries with groupBy=TagKey:<key> to get deduped
+    savings per tag value in a single API call.
 
     Returns a tuple of:
       - dict mapping tag_value -> estimated_monthly_savings (deduped)
@@ -59,23 +58,22 @@ def get_potential_savings_by_tag(
         config=Config(retries={"max_attempts": 5, "mode": "adaptive"}),
     )
 
-    savings_by_tag: dict[str, float] = {}
+    # Get deduped savings per tag value using groupBy=TagKey:<key>
+    savings_by_tag = _get_deduped_savings_by_tag(client, tag_key, tag_value)
+
+    if not savings_by_tag:
+        return {}, {}, {}
+
+    # Determine which tag values to get cost/resources for
+    tag_values = [tag_value] if tag_value else list(savings_by_tag.keys())
+
+    # Get estimatedMonthlyCost (and resources if requested) from ListRecommendations
     coh_cost_by_tag: dict[str, float] = {}
     resources_by_tag: dict[str, list[dict]] = {}
 
-    # If a specific tag value is provided, filter directly
-    if tag_value:
-        tag_values_to_query = [tag_value]
-    else:
-        # Discover all tag values by pulling recommendations and inspecting tags
-        tag_values_to_query = _discover_tag_values(client, tag_key)
-
-    for tv in tag_values_to_query:
-        # Get deduped savings from ListRecommendationSummaries
-        deduped_savings = _get_deduped_savings_for_tag(client, tag_key, tv)
-        savings_by_tag[tv] = deduped_savings
-
-        # Get estimatedMonthlyCost (and resources if requested) from ListRecommendations
+    for tv in tag_values:
+        if tv not in savings_by_tag:
+            continue
         coh_cost, resources = _get_cost_and_resources_for_tag(
             client, tag_key, tv, include_resources
         )
@@ -86,37 +84,47 @@ def get_potential_savings_by_tag(
     return savings_by_tag, coh_cost_by_tag, resources_by_tag
 
 
-def _get_deduped_savings_for_tag(client, tag_key: str, tag_value: str) -> float:
+def _get_deduped_savings_by_tag(
+    client, tag_key: str, tag_value: Optional[str] = None
+) -> dict[str, float]:
     """
-    Get deduped potential savings for a tag value using ListRecommendationSummaries.
+    Get deduped savings grouped by tag value using ListRecommendationSummaries
+    with groupBy=TagKey:<key>.
 
-    This API internally deduplicates savings across resource types, matching
-    how the efficiency metrics are calculated in the console.
+    Returns a dict mapping tag_value -> deduped_savings.
+    Excludes the "NoTagKey" group (resources without this tag).
     """
-    total_deduped_savings = 0.0
+    savings_by_tag: dict[str, float] = {}
     next_token = None
 
     while True:
-        params = {
-            "filter": {
-                "tags": [{"key": tag_key, "value": tag_value}]
-            },
-            "groupBy": "ResourceType",
+        params: dict = {
+            "groupBy": f"TagKey:{tag_key}",
             "maxResults": 1000,
         }
+        # If filtering to a specific tag value, add the filter
+        if tag_value:
+            params["filter"] = {
+                "tags": [{"key": tag_key, "value": tag_value}]
+            }
         if next_token:
             params["nextToken"] = next_token
 
         response = client.list_recommendation_summaries(**params)
 
-        # estimatedTotalDedupedSavings is the authoritative deduped total
-        total_deduped_savings = response.get("estimatedTotalDedupedSavings", 0.0)
+        for item in response.get("items", []):
+            group = item.get("group", "")
+            # Skip resources that don't have this tag
+            if group == "NoTagKey":
+                continue
+            savings = item.get("estimatedMonthlySavings", 0.0)
+            savings_by_tag[group] = savings_by_tag.get(group, 0.0) + savings
 
         next_token = response.get("nextToken")
         if not next_token:
             break
 
-    return total_deduped_savings
+    return savings_by_tag
 
 
 def _get_cost_and_resources_for_tag(
@@ -155,37 +163,6 @@ def _get_cost_and_resources_for_tag(
     return total_coh_cost, resources
 
 
-def _discover_tag_values(client, tag_key: str) -> list[str]:
-    """
-    Discover all values for a given tag key by scanning recommendations.
-
-    Since COH doesn't support groupBy tag, we pull all recommendations
-    and collect unique tag values.
-    """
-    tag_values: set[str] = set()
-    next_token = None
-
-    while True:
-        params: dict = {"maxResults": 1000}
-        if next_token:
-            params["nextToken"] = next_token
-
-        response = client.list_recommendations(**params)
-
-        for rec in response.get("items", []):
-            rec_tags = rec.get("tags", [])
-            for tag in rec_tags:
-                if tag.get("key") == tag_key:
-                    tag_values.add(tag.get("value", ""))
-                    break
-
-        next_token = response.get("nextToken")
-        if not next_token:
-            break
-
-    return sorted(tag_values)
-
-
 def _extract_resource_info(rec: dict) -> dict:
     """Extract relevant resource info from a recommendation item."""
     return {
@@ -215,7 +192,8 @@ def get_optimizable_spend_by_tag(
     Query Cost Explorer for Total Optimizable Spend per tag value.
 
     Filters to only the services in scope for Cost Optimization Hub.
-    Uses AmortizedCost to align with COH methodology.
+    Uses NetAmortizedCost to match COH methodology — this is amortized cost
+    with credits and refunds removed, per the Cost Optimization Hub docs.
     """
     client = session.client("ce")
     spend_by_tag: dict[str, float] = {}
@@ -224,7 +202,7 @@ def get_optimizable_spend_by_tag(
         response = client.get_cost_and_usage(
             TimePeriod={"Start": start_date, "End": end_date},
             Granularity="MONTHLY",
-            Metrics=["AmortizedCost"],
+            Metrics=["NetAmortizedCost"],
             Filter={
                 "And": [
                     {
@@ -247,7 +225,7 @@ def get_optimizable_spend_by_tag(
 
         total_cost = 0.0
         for result in response.get("ResultsByTime", []):
-            amount = result.get("Total", {}).get("AmortizedCost", {}).get("Amount", "0")
+            amount = result.get("Total", {}).get("NetAmortizedCost", {}).get("Amount", "0")
             total_cost += float(amount)
 
         spend_by_tag[tv] = total_cost
