@@ -143,18 +143,26 @@ Resource Details by Tag: Application
 
 ## Services in Scope for Total Optimizable Spend
 
-The spend denominator is calculated only for services where Cost Optimization Hub provides recommendations:
+The spend denominator is calculated only for services and resources where Cost Optimization Hub provides recommendations:
 
-- Amazon EC2 (instances, EBS volumes, EBS snapshots)
+- Amazon EC2 instances
+- Amazon ECS
+- Amazon EKS
+- Amazon EBS volumes and snapshots *(captured under "EC2 - Other" via usage-type filtering)*
 - Amazon RDS
-- Amazon OpenSearch Service
-- Amazon ElastiCache
-- AWS Lambda
-- Amazon ECS (Fargate)
+- Amazon SageMaker
 - Amazon Redshift
+- AWS Lambda
+- Amazon OpenSearch Service
+- Amazon MemoryDB
 - Amazon DynamoDB
-- Amazon CloudWatch
-- Amazon S3
+- Amazon ElastiCache
+- NAT Gateway *(captured under "EC2 - Other" via usage-type filtering)*
+
+Notes:
+- S3 and CloudWatch are **not** included — they are not part of Total Optimizable Spend.
+- The metric used is **NetAmortizedCost** (credits and refunds removed).
+- The `ListEfficiencyMetrics` API returns Total Optimizable Spend directly at the account and Region level, but not grouped by tag. This Cost Explorer reconstruction produces the tag-level equivalent using the same methodology.
 
 ## API Endpoints
 

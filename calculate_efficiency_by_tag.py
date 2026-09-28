@@ -21,18 +21,41 @@ from botocore.config import Config
 
 # Services in scope for Total Optimizable Spend in Cost Optimization Hub.
 # These are the services where COH provides optimization recommendations.
+# Names must match the Cost Explorer SERVICE dimension values.
+# Note: EBS is intentionally NOT listed here. In Cost Explorer, EBS has no
+# standalone SERVICE value — its costs live under "EC2 - Other" (alongside
+# non-optimizable items like NAT Gateway). Including an EBS SERVICE value
+# pulls in all of "EC2 - Other". EBS is instead captured separately via
+# USAGE_TYPE_GROUP filtering in get_optimizable_spend_by_tag.
 OPTIMIZABLE_SERVICES = [
     "Amazon Elastic Compute Cloud - Compute",
-    "Amazon Elastic Block Store",
+    "Amazon Elastic Container Service",
+    "Amazon Elastic Container Service for Kubernetes",
     "Amazon Relational Database Service",
     "Amazon OpenSearch Service",
     "Amazon ElastiCache",
+    "Amazon MemoryDB",
     "AWS Lambda",
-    "Amazon Elastic Container Service",
+    "Amazon SageMaker",
     "Amazon Redshift",
     "Amazon DynamoDB",
-    "AmazonCloudWatch",
-    "Amazon Simple Storage Service",
+]
+
+# COH-optimizable resources that live under the Cost Explorer "EC2 - Other"
+# service. EBS (volumes + snapshots) and NAT Gateway are captured; other
+# EC2-Other usage (data transfer, ELB, etc.) is excluded.
+EC2_OTHER_USAGE_TYPE_GROUPS = [
+    "EC2: EBS - SSD(gp2)",
+    "EC2: EBS - SSD(gp3)",
+    "EC2: EBS - SSD(io1)",
+    "EC2: EBS - SSD(io2)",
+    "EC2: EBS - HDD(sc1)",
+    "EC2: EBS - HDD(st1)",
+    "EC2: EBS - Magnetic",
+    "EC2: EBS - Snapshots",
+    "EC2: EBS - Optimized",
+    "EC2: NAT Gateway - Running Hours",
+    "EC2: NAT Gateway - Data Processed",
 ]
 
 
@@ -191,46 +214,90 @@ def get_optimizable_spend_by_tag(
     """
     Query Cost Explorer for Total Optimizable Spend per tag value.
 
-    Filters to only the services in scope for Cost Optimization Hub.
+    Filters to only the services/resources in scope for Cost Optimization Hub.
     Uses NetAmortizedCost to match COH methodology — this is amortized cost
     with credits and refunds removed, per the Cost Optimization Hub docs.
+
+    Under "EC2 - Other" in Cost Explorer, only EBS (volumes + snapshots) and
+    NAT Gateway usage types are included — both are COH-optimizable resources.
+    Other EC2-Other items (data transfer, etc.) are excluded.
     """
     client = session.client("ce")
     spend_by_tag: dict[str, float] = {}
 
     for tv in tag_values:
-        response = client.get_cost_and_usage(
-            TimePeriod={"Start": start_date, "End": end_date},
-            Granularity="MONTHLY",
-            Metrics=["NetAmortizedCost"],
-            Filter={
-                "And": [
-                    {
-                        "Tags": {
-                            "Key": tag_key,
-                            "Values": [tv],
-                            "MatchOptions": ["EQUALS"],
-                        }
-                    },
-                    {
-                        "Dimensions": {
-                            "Key": "SERVICE",
-                            "Values": OPTIMIZABLE_SERVICES,
-                            "MatchOptions": ["EQUALS"],
-                        }
-                    },
-                ]
-            },
+        # Query 1: the optimizable services that have their own SERVICE value
+        service_filter = {
+            "And": [
+                {
+                    "Tags": {
+                        "Key": tag_key,
+                        "Values": [tv],
+                        "MatchOptions": ["EQUALS"],
+                    }
+                },
+                {
+                    "Dimensions": {
+                        "Key": "SERVICE",
+                        "Values": OPTIMIZABLE_SERVICES,
+                        "MatchOptions": ["EQUALS"],
+                    }
+                },
+            ]
+        }
+        total_cost = _sum_net_amortized(
+            client, start_date, end_date, service_filter
         )
 
-        total_cost = 0.0
-        for result in response.get("ResultsByTime", []):
-            amount = result.get("Total", {}).get("NetAmortizedCost", {}).get("Amount", "0")
-            total_cost += float(amount)
+        # Query 2: EBS and NAT Gateway live inside "EC2 - Other" — capture only
+        # those usage type groups (both are COH-optimizable resources).
+        ec2_other_filter = {
+            "And": [
+                {
+                    "Tags": {
+                        "Key": tag_key,
+                        "Values": [tv],
+                        "MatchOptions": ["EQUALS"],
+                    }
+                },
+                {
+                    "Dimensions": {
+                        "Key": "SERVICE",
+                        "Values": ["EC2 - Other"],
+                        "MatchOptions": ["EQUALS"],
+                    }
+                },
+                {
+                    "Dimensions": {
+                        "Key": "USAGE_TYPE_GROUP",
+                        "Values": EC2_OTHER_USAGE_TYPE_GROUPS,
+                        "MatchOptions": ["EQUALS"],
+                    }
+                },
+            ]
+        }
+        total_cost += _sum_net_amortized(
+            client, start_date, end_date, ec2_other_filter
+        )
 
         spend_by_tag[tv] = total_cost
 
     return spend_by_tag
+
+
+def _sum_net_amortized(client, start_date: str, end_date: str, cost_filter: dict) -> float:
+    """Run a GetCostAndUsage query and sum NetAmortizedCost across time periods."""
+    response = client.get_cost_and_usage(
+        TimePeriod={"Start": start_date, "End": end_date},
+        Granularity="MONTHLY",
+        Metrics=["NetAmortizedCost"],
+        Filter=cost_filter,
+    )
+    total = 0.0
+    for result in response.get("ResultsByTime", []):
+        amount = result.get("Total", {}).get("NetAmortizedCost", {}).get("Amount", "0")
+        total += float(amount)
+    return total
 
 
 def calculate_efficiency_scores(
